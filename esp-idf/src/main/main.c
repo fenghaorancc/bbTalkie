@@ -906,10 +906,10 @@ void detect_Task(void *arg)
 void ping_task(void *arg)
 {
     send_data_esp_now((const uint8_t *)PING_MAGIC, PING_MAGIC_LEN);
-    // ping every 10 seconds
+    // ping every 1 second
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(10000)); // 10 seconds
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 second
         send_data_esp_now((const uint8_t *)PING_MAGIC, PING_MAGIC_LEN);
     }
 }
@@ -1199,12 +1199,23 @@ void oled_task(void *arg)
         {
             state = 0; // Idle
         }
-        if (state == 0 && macCount != lastMacCount)
+
+        int activeMacCount = 1;
+        int64_t now = esp_timer_get_time() / 1000; // ms
+        for (int i = 0; i < MAX_MAC_TRACK; ++i)
         {
-            lastMacCount = macCount;
+            if (mac_track_list[i].valid && mac_track_list[i].last_seen_ms > now - 5000)
+            {
+                activeMacCount++;
+            }
+        }
+
+        if (state == 0 && activeMacCount != lastMacCount)
+        {
+            lastMacCount = activeMacCount;
             // convert macCount from int to string
             char macCountStr[2]; // Enough space for int range + null terminator
-            sprintf(macCountStr, "%d", macCount);
+            snprintf(macCountStr, sizeof(macCountStr), "%d", activeMacCount);
             spi_oled_draw_square(&spi_ssd1327, 74, 38, 36, 36, SSD1327_GS_0);
             xTaskCreate(fade_in_drawCount, "drawCount", 2048, macCountStr, 5, NULL);
         }
