@@ -1671,7 +1671,7 @@ void app_main()
     
     // Reset critical flags first
     isShutdown = false;
-    
+
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -1749,14 +1749,21 @@ void app_main()
         xTaskCreatePinnedToCore(charging_Task, "charging", 4 * 1024, NULL, 5, NULL, 0);
         return;
     }
-    
+
     // Handle button wake-up
     if (wakeup_pin_mask & (1ULL << GPIO_WAKEUP_2))
     {
         printf("Wakeup caused by GPIO8 (Button)\n");
-        // Add a small delay to let the GPIO settle after wake-up
+    }
+
+    // Wait for button to be released before initializing it.
+    // Otherwise it doesn't work if user presses button for long to wakeup
+    while (gpio_get_level(BUTTON_GPIO) == 0)
+    {
+        printf("Waiting for button release\n");
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+    vTaskDelay(pdMS_TO_TICKS(100)); // Debounce
 
     // Initialize button AFTER all GPIO configurations and wake-up handling
     if (init_button() != ESP_OK) {
