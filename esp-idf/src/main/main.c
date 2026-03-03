@@ -76,8 +76,8 @@
 #define SAMPLE_RATE 16000
 #define BIT_DEPTH 16
 #define ENCODED_BUF_SIZE 10240
-#define PLAY_RING_BUFFER_SIZE 8192
-#define PLAY_CHUNK_SIZE 2048
+#define PLAY_RING_BUFFER_SIZE 1024
+#define PLAY_CHUNK_SIZE 512
 #define ESP_NOW_PACKET_SIZE 512
 
 #define SPI_MOSI_PIN_NUM 14
@@ -906,10 +906,10 @@ void detect_Task(void *arg)
 void ping_task(void *arg)
 {
     send_data_esp_now((const uint8_t *)PING_MAGIC, PING_MAGIC_LEN);
-    // ping every 10 seconds
+    // ping every 1 second
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(10000)); // 10 seconds
+        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 second
         send_data_esp_now((const uint8_t *)PING_MAGIC, PING_MAGIC_LEN);
     }
 }
@@ -1199,12 +1199,23 @@ void oled_task(void *arg)
         {
             state = 0; // Idle
         }
-        if (state == 0 && macCount != lastMacCount)
+
+        int activeMacCount = 1;
+        int64_t now = esp_timer_get_time() / 1000; // ms
+        for (int i = 0; i < MAX_MAC_TRACK; ++i)
         {
-            lastMacCount = macCount;
+            if (mac_track_list[i].valid && mac_track_list[i].last_seen_ms > now - 5000)
+            {
+                activeMacCount++;
+            }
+        }
+
+        if (state == 0 && activeMacCount != lastMacCount)
+        {
+            lastMacCount = activeMacCount;
             // convert macCount from int to string
             char macCountStr[2]; // Enough space for int range + null terminator
-            sprintf(macCountStr, "%d", macCount);
+            snprintf(macCountStr, sizeof(macCountStr), "%d", activeMacCount);
             spi_oled_draw_square(&spi_ssd1327, 74, 38, 36, 36, SSD1327_GS_0);
             xTaskCreate(fade_in_drawCount, "drawCount", 2048, macCountStr, 5, NULL);
         }
@@ -1660,7 +1671,7 @@ void app_main()
     
     // Reset critical flags first
     isShutdown = false;
-    
+
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -1738,14 +1749,21 @@ void app_main()
         xTaskCreatePinnedToCore(charging_Task, "charging", 4 * 1024, NULL, 5, NULL, 0);
         return;
     }
-    
+
     // Handle button wake-up
     if (wakeup_pin_mask & (1ULL << GPIO_WAKEUP_2))
     {
         printf("Wakeup caused by GPIO8 (Button)\n");
-        // Add a small delay to let the GPIO settle after wake-up
+    }
+
+    // Wait for button to be released before initializing it.
+    // Otherwise it doesn't work if user presses button for long to wakeup
+    while (gpio_get_level(BUTTON_GPIO) == 0)
+    {
+        printf("Waiting for button release\n");
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+    vTaskDelay(pdMS_TO_TICKS(100)); // Debounce
 
     // Initialize button AFTER all GPIO configurations and wake-up handling
     if (init_button() != ESP_OK) {
@@ -1762,7 +1780,7 @@ void app_main()
     xTaskCreatePinnedToCore(oled_task, "oled", 4 * 1024, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(boot_sound, "bootSound", 3 * 1024, NULL, 5, NULL, 1);
     xTaskCreatePinnedToCore(&feed_Task, "feed", 8 * 1024, (void *)afe_data, 5, NULL, 0);
-    xTaskCreatePinnedToCore(&detect_Task, "detect", 4 * 1024, (void *)afe_data, 5, NULL, 1);
+    xTaskCreatePinnedToCore(&detect_Task, "detect", 8 * 1024, (void *)afe_data, 5, NULL, 1);
     xTaskCreatePinnedToCore(decode_Task, "decode", 4 * 1024, NULL, 5, NULL, 0);
     xTaskCreatePinnedToCore(i2s_writer_task, "i2sWriter", 4 * 1024, NULL, 5, NULL, 0);
     xTaskCreate(ping_task, "ping", 3 * 1024, NULL, 5, NULL);
