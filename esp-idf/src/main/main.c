@@ -76,8 +76,8 @@
 #define SAMPLE_RATE 16000
 #define BIT_DEPTH 16
 #define ENCODED_BUF_SIZE 10240
-#define PLAY_RING_BUFFER_SIZE 1024
-#define PLAY_CHUNK_SIZE 512
+#define PLAY_RING_BUFFER_SIZE 8192
+#define PLAY_CHUNK_SIZE 2048
 #define ESP_NOW_PACKET_SIZE 512
 
 #define SPI_MOSI_PIN_NUM 14
@@ -100,6 +100,12 @@
 #define PING_MAGIC_LEN 4
 #define MAX_MAC_TRACK 9
 #define MAC_TIMEOUT_MS 20000
+
+// Team ID for message filtering - Change this to your unique team identifier
+#define TEAM_ID "TEAM_CCZZ"
+#define TEAM_ID_LEN 9  // Length of "TEAM_7F2E"
+#define TEAM_PREFIX_LEN (TEAM_ID_LEN + 1)  // "TEAM_7F2E|" = 10 bytes
+
 int macCount = 1;
 int lastMacCount = 0;
 spi_oled_animation_t *anim_currentCommand = NULL;
@@ -231,27 +237,65 @@ static void esp_now_send_cb(const uint8_t *mac_addr, esp_now_send_status_t statu
     }
 }
 
+// Verify team ID in received message
+bool verify_team_id(const uint8_t *data, int data_len)
+{
+    if (data_len < TEAM_PREFIX_LEN)
+    {
+        return false;
+    }
+    
+    // Check if message starts with "TEAM_7F2E|"
+    if (memcmp(data, TEAM_ID, TEAM_ID_LEN) == 0 && data[TEAM_ID_LEN] == '|')
+    {
+        return true;
+    }
+    
+    return false;
+}
+
+// Add team ID prefix to outgoing message
+void add_team_prefix(uint8_t *dest, const uint8_t *src, size_t src_len, size_t *total_len)
+{
+    // Copy team ID
+    memcpy(dest, TEAM_ID, TEAM_ID_LEN);
+    dest[TEAM_ID_LEN] = '|';
+    
+    // Copy original data
+    memcpy(dest + TEAM_PREFIX_LEN, src, src_len);
+    
+    *total_len = TEAM_PREFIX_LEN + src_len;
+}
+
 void send_data_esp_now(const uint8_t *data, size_t len)
 {
-    size_t offset = 0;
-
-    while (offset < len)
+    // Allocate buffer for team prefix + data
+    uint8_t *prefixed_data = malloc(TEAM_PREFIX_LEN + len);
+    if (prefixed_data == NULL)
     {
-        size_t chunk_size = len - offset > ESP_NOW_PACKET_SIZE ? ESP_NOW_PACKET_SIZE : len - offset;
+        ESP_LOGE(TAG, "Failed to allocate memory for team prefix");
+        return;
+    }
+    
+    size_t total_len;
+    add_team_prefix(prefixed_data, data, len, &total_len);
 
-        esp_err_t ret = esp_now_send(broadcast_mac, data + offset, chunk_size);
+    size_t offset = 0;
+    while (offset < total_len)
+    {
+        size_t chunk_size = total_len - offset > ESP_NOW_PACKET_SIZE ? ESP_NOW_PACKET_SIZE : total_len - offset;
+
+        esp_err_t ret = esp_now_send(broadcast_mac, prefixed_data + offset, chunk_size);
         if (ret != ESP_OK)
         {
             ESP_LOGE(TAG, "ESP-NOW send failed at offset %zu: %s", offset, esp_err_to_name(ret));
-        }
-        else
-        {
-            // ESP_LOGI(TAG, "Sent %zu bytes of data via ESP-NOW (offset %zu)", chunk_size, offset);
         }
 
         offset += chunk_size;
         vTaskDelay(pdMS_TO_TICKS(16));
     }
+
+    free(prefixed_data);
 }
 
 // Get received data (non-blocking)
@@ -400,6 +444,17 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
     
     ESP_ERROR_CHECK(esp_wifi_connectionless_module_set_wake_interval(0));
     ESP_LOGI(TAG, "Received %d bytes, RSSI: %d dBm", data_len, recv_info->rx_ctrl->rssi);
+
+    // Verify team ID first
+    if (!verify_team_id(data, data_len))
+    {
+        ESP_LOGW(TAG, "Rejected message: invalid team ID");
+        return;
+    }
+    
+    // Skip team prefix for further processing
+    data += TEAM_PREFIX_LEN;
+    data_len -= TEAM_PREFIX_LEN;
 
     if (data_len == PING_MAGIC_LEN && memcmp(data, PING_MAGIC, PING_MAGIC_LEN) == 0) // PING MSG
     {
@@ -846,7 +901,7 @@ void detect_Task(void *arg)
                 esp_mn_results_t *mn_result = multinet->get_results(model_data);
                 for (int i = 0; i < mn_result->num; i++)
                 {
-                    printf("TOP %d, command_id: %d, phrase_id: %d, string:%s prob: %f\n",
+                    printf("TOP %d, command_id: %d, phrase_id: %d, string:%s, prob: %f\n",
                            i + 1, mn_result->command_id[i], mn_result->phrase_id[i], 
                            mn_result->string, mn_result->prob[i]);
                 }
@@ -906,10 +961,10 @@ void detect_Task(void *arg)
 void ping_task(void *arg)
 {
     send_data_esp_now((const uint8_t *)PING_MAGIC, PING_MAGIC_LEN);
-    // ping every 1 second
+    // ping every 10 seconds
     while (1)
     {
-        vTaskDelay(pdMS_TO_TICKS(1000)); // 1 second
+        vTaskDelay(pdMS_TO_TICKS(10000)); // 10 seconds
         send_data_esp_now((const uint8_t *)PING_MAGIC, PING_MAGIC_LEN);
     }
 }
@@ -1199,23 +1254,12 @@ void oled_task(void *arg)
         {
             state = 0; // Idle
         }
-
-        int activeMacCount = 1;
-        int64_t now = esp_timer_get_time() / 1000; // ms
-        for (int i = 0; i < MAX_MAC_TRACK; ++i)
+        if (state == 0 && macCount != lastMacCount)
         {
-            if (mac_track_list[i].valid && mac_track_list[i].last_seen_ms > now - 5000)
-            {
-                activeMacCount++;
-            }
-        }
-
-        if (state == 0 && activeMacCount != lastMacCount)
-        {
-            lastMacCount = activeMacCount;
+            lastMacCount = macCount;
             // convert macCount from int to string
             char macCountStr[2]; // Enough space for int range + null terminator
-            snprintf(macCountStr, sizeof(macCountStr), "%d", activeMacCount);
+            sprintf(macCountStr, "%d", macCount);
             spi_oled_draw_square(&spi_ssd1327, 74, 38, 36, 36, SSD1327_GS_0);
             xTaskCreate(fade_in_drawCount, "drawCount", 2048, macCountStr, 5, NULL);
         }
@@ -1671,7 +1715,7 @@ void app_main()
     
     // Reset critical flags first
     isShutdown = false;
-
+    
     // Initialize NVS
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND)
@@ -1749,21 +1793,14 @@ void app_main()
         xTaskCreatePinnedToCore(charging_Task, "charging", 4 * 1024, NULL, 5, NULL, 0);
         return;
     }
-
+    
     // Handle button wake-up
     if (wakeup_pin_mask & (1ULL << GPIO_WAKEUP_2))
     {
         printf("Wakeup caused by GPIO8 (Button)\n");
-    }
-
-    // Wait for button to be released before initializing it.
-    // Otherwise it doesn't work if user presses button for long to wakeup
-    while (gpio_get_level(BUTTON_GPIO) == 0)
-    {
-        printf("Waiting for button release\n");
+        // Add a small delay to let the GPIO settle after wake-up
         vTaskDelay(pdMS_TO_TICKS(100));
     }
-    vTaskDelay(pdMS_TO_TICKS(100)); // Debounce
 
     // Initialize button AFTER all GPIO configurations and wake-up handling
     if (init_button() != ESP_OK) {
