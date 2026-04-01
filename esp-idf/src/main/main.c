@@ -106,6 +106,9 @@
 #define TEAM_ID_LEN 9  // Length of "TEAM_CCZZ"
 #define TEAM_PREFIX_LEN (TEAM_ID_LEN + 1)  // "TEAM_7F2E|" = 10 bytes
 
+// 方法引用
+static void button_single_click_cb(void *arg, void *usr_data);
+
 int macCount = 1;
 int lastMacCount = 0;
 spi_oled_animation_t *anim_currentCommand = NULL;
@@ -166,6 +169,7 @@ struct spi_ssd1327 spi_ssd1327 = {
     .spi_handle = &oled_dev_handle,
 };
 SemaphoreHandle_t spi_mutex;
+static int64_t command_anim_start_ms = 0;
 
 // AGC playback
 // Initialize AGC
@@ -517,6 +521,7 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
             anim_currentCommand = get_animation_by_key(cmd_value);
             lastState = -1;
             is_command = true;
+            command_anim_start_ms = esp_timer_get_time() / 1000;
         }
     }
     // MSG: prefix handling
@@ -911,6 +916,7 @@ void detect_Task(void *arg)
                 anim_currentCommand = get_animation_by_key(mn_result->command_id[0]);
                 lastState = -1;
                 is_command = true;
+                command_anim_start_ms = esp_timer_get_time() / 1000;
 
                 // Send CMD via ESP-NOW
                 char cmd_buffer[32];
@@ -1241,6 +1247,13 @@ void oled_task(void *arg)
         if (is_command)
         {
             state = 3;
+            
+            int64_t now_ms = esp_timer_get_time() / 1000;
+            if (now_ms - command_anim_start_ms >= 20000)
+            {
+                printf("模拟单点 button\n");
+                button_single_click_cb(NULL, NULL);
+            }
         }
         else if (is_receiving)
         {
@@ -1643,6 +1656,7 @@ static void button_single_click_cb(void *arg, void *usr_data)
     printf("Single click\n");
     if(is_command){
         is_command = false;
+        command_anim_start_ms = 0;
     }
     else{
         isMicOff = !isMicOff;
