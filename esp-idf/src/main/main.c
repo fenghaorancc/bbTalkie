@@ -98,12 +98,12 @@
 
 #define PING_MAGIC "PING"
 #define PING_MAGIC_LEN 4
-#define MAX_MAC_TRACK 9
-#define MAC_TIMEOUT_MS 20000
+#define MAX_MAC_TRACK 10 // 最大设备数
+#define MAC_TIMEOUT_MS 20000 // 设备超时时间
 
 // Team ID for message filtering - Change this to your unique team identifier
 #define TEAM_ID "TEAM_CCZZ"
-#define TEAM_ID_LEN 9  // Length of "TEAM_7F2E"
+#define TEAM_ID_LEN 9  // Length of "TEAM_CCZZ"
 #define TEAM_PREFIX_LEN (TEAM_ID_LEN + 1)  // "TEAM_7F2E|" = 10 bytes
 
 int macCount = 1;
@@ -443,7 +443,7 @@ static void esp_now_recv_cb(const esp_now_recv_info_t *recv_info, const uint8_t 
     // Log reception
     
     ESP_ERROR_CHECK(esp_wifi_connectionless_module_set_wake_interval(0));
-    ESP_LOGI(TAG, "Received %d bytes, RSSI: %d dBm", data_len, recv_info->rx_ctrl->rssi);
+    // ESP_LOGI(TAG, "Received %d bytes, RSSI: %d dBm", data_len, recv_info->rx_ctrl->rssi);
 
     // Verify team ID first
     if (!verify_team_id(data, data_len))
@@ -1258,9 +1258,9 @@ void oled_task(void *arg)
         {
             lastMacCount = macCount;
             // convert macCount from int to string
-            char macCountStr[2]; // Enough space for int range + null terminator
+            char macCountStr[4]; // Enough space for int range + null terminator
             sprintf(macCountStr, "%d", macCount);
-            spi_oled_draw_square(&spi_ssd1327, 74, 38, 36, 36, SSD1327_GS_0);
+            spi_oled_draw_square(&spi_ssd1327, 74, 38, 72, 36, SSD1327_GS_0);
             xTaskCreate(fade_in_drawCount, "drawCount", 2048, macCountStr, 5, NULL);
         }
         if (state != lastState)
@@ -1707,6 +1707,42 @@ static esp_err_t init_button(void)
     return ESP_OK;
 }
 
+void mac_timeout_task(void *pvParameters)
+{
+    while (!isShutdown)
+    {
+        int64_t now = esp_timer_get_time() / 1000; // 毫秒
+        
+        // 先检查超时，标记为 invalid
+        for (int i = 0; i < MAX_MAC_TRACK; i++)
+        {
+            if (mac_track_list[i].valid && 
+                (now - mac_track_list[i].last_seen_ms) > MAC_TIMEOUT_MS)
+            {
+                ESP_LOGI(TAG, "MAC timeout: %02x:%02x:%02x:%02x:%02x:%02x",
+                         mac_track_list[i].mac[0], mac_track_list[i].mac[1],
+                         mac_track_list[i].mac[2], mac_track_list[i].mac[3],
+                         mac_track_list[i].mac[4], mac_track_list[i].mac[5]);
+                mac_track_list[i].valid = false;
+            }
+        }
+        
+        // 重新统计在线设备数
+        int count = 1; // 从 1 开始（包括自己）
+        for (int i = 0; i < MAX_MAC_TRACK; i++)
+        {
+            if (mac_track_list[i].valid)
+            {
+                count++;
+            }
+        }
+        macCount = count;
+        
+        vTaskDelay(pdMS_TO_TICKS(10000)); // 每 10 秒检查一次
+    }
+    vTaskDelete(NULL);
+}
+
 void app_main()
 {
     // Check which GPIO caused the wakeup (if any)
@@ -1822,4 +1858,5 @@ void app_main()
     xTaskCreatePinnedToCore(i2s_writer_task, "i2sWriter", 4 * 1024, NULL, 5, NULL, 0);
     xTaskCreate(ping_task, "ping", 3 * 1024, NULL, 5, NULL);
     xTaskCreate(led_control_task, "led_control", 3 * 1024, NULL, 5, NULL);
+    xTaskCreate(mac_timeout_task, "mac_timeout", 3 * 1024, NULL, 3, NULL);
 }
